@@ -3,7 +3,7 @@ name: IDR critical journeys
 on:
   schedule:
     # Hourly at minute 17 (UTC). P0 + P1 checks, gateway step skipped.
-    - cron: '17 * * * *'
+    - cron: '5 * * * *'
     # Once a day at 03:47 UTC (09:17 IST): also open the payment gateway.
     - cron: '47 3 * * *'
   workflow_dispatch:
