@@ -1,0 +1,77 @@
+name: IDR critical journeys
+
+on:
+  schedule:
+    # Hourly at minute 17 (UTC). P0 + P1 checks, gateway step skipped.
+    - cron: '17 * * * *'
+    # Once a day at 03:47 UTC (09:17 IST): also open the payment gateway.
+    - cron: '47 3 * * *'
+  workflow_dispatch:
+    inputs:
+      run_gateway:
+        description: 'Also test opening the payment gateway'
+        type: boolean
+        default: false
+
+concurrency:
+  group: cuj-monitor
+  cancel-in-progress: false
+
+jobs:
+  journeys:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUN_GATEWAY: ${{ (github.event.schedule == '47 3 * * *' || inputs.run_gateway) && '1' || '0' }}
+      NEWSLETTER_TEST_EMAIL: ${{ secrets.NEWSLETTER_TEST_EMAIL }}
+      TEST_DONOR_EMAIL: ${{ secrets.TEST_DONOR_EMAIL }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run P0 journeys
+        id: p0
+        continue-on-error: true
+        run: npx playwright test --grep @P0 --output=test-results/p0
+
+      - name: Run P1 journeys
+        id: p1
+        continue-on-error: true
+        run: npx playwright test --grep @P1 --output=test-results/p1
+
+      - name: Upload report and failure screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.run_id }}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14
+
+      - name: Alert Slack on failure
+        if: (steps.p0.outcome == 'failure' || steps.p1.outcome == 'failure') && env.SLACK_WEBHOOK_URL != ''
+        env:
+          LEVEL: ${{ steps.p0.outcome == 'failure' && 'P0 (critical)' || 'P1 (high)' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          curl -sS -X POST -H 'Content-Type: application/json' \
+            --data "{\"text\":\":rotating_light: idronline.org ${LEVEL} journey failed. Report and screenshots: ${RUN_URL}\"}" \
+            "$SLACK_WEBHOOK_URL"
+
+      - name: Fail the run if any journey failed
+        if: steps.p0.outcome == 'failure' || steps.p1.outcome == 'failure'
+        run: |
+          echo "P0: ${{ steps.p0.outcome }} | P1: ${{ steps.p1.outcome }}"
+          exit 1

@@ -1,0 +1,17 @@
+{
+  "name": "idr-critical-journeys",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Synthetic monitoring of idronline.org critical user journeys (P0/P1) with Playwright",
+  "scripts": {
+    "test": "playwright test",
+    "test:p0": "playwright test --grep @P0",
+    "test:p1": "playwright test --grep @P1",
+    "test:headed": "playwright test --headed --project=desktop",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "@types/node": "^20.0.0"
+  }
+}
