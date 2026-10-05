@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      RUN_GATEWAY: ${{ (github.event.schedule == '47 3 * * *' || inputs.run_gateway) && '1' || '0' }}
+      RUN_GATEWAY: ${{ (github.event.schedule == '47 3 * * *' || inputs.run_gateway == true) && '1' || '0' }}
       NEWSLETTER_TEST_EMAIL: ${{ secrets.NEWSLETTER_TEST_EMAIL }}
       TEST_DONOR_EMAIL: ${{ secrets.TEST_DONOR_EMAIL }}
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
