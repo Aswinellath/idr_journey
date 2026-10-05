@@ -1,6 +1,9 @@
 name: IDR critical journeys
 
 on:
+  push:
+    branches:
+      - main
   schedule:
     # Hourly at minute 17 (UTC). P0 + P1 checks, gateway step skipped.
     - cron: '5 * * * *'
