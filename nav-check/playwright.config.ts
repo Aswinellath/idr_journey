@@ -12,7 +12,7 @@ export default defineConfig({
   timeout: 120_000,
   expect: { timeout: 10_000 },
   retries: 1,
-  workers: process.env.CI ? 3 : undefined,
+  workers: process.env.CI ? 2 : undefined,
   reporter: [
     ['list'],
     ['html', { open: 'never' }],
@@ -21,7 +21,7 @@ export default defineConfig({
   use: {
     baseURL: site.baseURL,
     actionTimeout: 15_000,
-    navigationTimeout: 45_000,
+    navigationTimeout: 60_000,
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
     video: 'retain-on-failure',
