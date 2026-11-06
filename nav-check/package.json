@@ -1,0 +1,18 @@
+{
+  "name": "idr-nav-check",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Checks idronline.org menus, dropdowns and menu links on Chrome, Firefox and Safari (WebKit) at desktop, tablet and mobile sizes",
+  "scripts": {
+    "test": "playwright test",
+    "test:desktop": "playwright test --project=chromium-desktop --project=firefox-desktop --project=webkit-desktop",
+    "test:mobile": "playwright test --project=chromium-mobile --project=firefox-mobile --project=webkit-mobile",
+    "test:chrome": "playwright test --project=chromium-desktop --project=chromium-tablet --project=chromium-mobile",
+    "test:headed": "playwright test --headed --project=chromium-desktop",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.51.0",
+    "@types/node": "^20.0.0"
+  }
+}
