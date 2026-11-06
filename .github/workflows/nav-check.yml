@@ -1,0 +1,69 @@
+name: IDR menu & links check
+
+# Triggered by cron-job.org at 07:00 and 17:00 (Asia/Colombo / IST) — see nav-check/README.md.
+# You can also run it by hand: Actions tab → IDR menu & links check → Run workflow.
+on:
+  workflow_dispatch:
+  # Backup only: GitHub's own schedule (UTC) is often late on free accounts.
+  # Uncomment to use it instead of cron-job.org (don't use both, or it runs twice).
+  # schedule:
+  #   - cron: '30 1 * * *'    # 07:00 IST / Sri Lanka
+  #   - cron: '30 11 * * *'   # 17:00 IST / Sri Lanka
+
+concurrency:
+  group: nav-check
+  cancel-in-progress: false
+
+jobs:
+  menus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: nav-check
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Chrome, Firefox and Safari (WebKit)
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Run menu checks (9 browser × screen combinations)
+        id: tests
+        continue-on-error: true
+        run: npx playwright test
+
+      - name: Write summary table
+        if: always()
+        run: node scripts/summary.mjs
+
+      - name: Upload report and failure screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nav-check-report-${{ github.run_id }}
+          path: |
+            nav-check/playwright-report/
+            nav-check/test-results/
+          retention-days: 14
+
+      - name: Alert Slack on failure
+        if: steps.tests.outcome == 'failure' && env.SLACK_WEBHOOK_URL != ''
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          curl -sS -X POST -H 'Content-Type: application/json' \
+            --data "{\"text\":\":compass: idronline.org menu/link check failed. Summary and screenshots: ${RUN_URL}\"}" \
+            "$SLACK_WEBHOOK_URL"
+
+      - name: Fail the run if any check failed
+        if: steps.tests.outcome == 'failure'
+        run: exit 1
