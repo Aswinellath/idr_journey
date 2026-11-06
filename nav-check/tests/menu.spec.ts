@@ -1,7 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { site } from '../site.config';
 import {
-  acceptCookies,
+  blockedBy,
+  blockExtras,
   closeHover,
   collectMenuLinks,
   expandDropdown,
@@ -9,6 +10,7 @@ import {
   gotoOk,
   menu,
   openMobileMenu,
+  prepare,
   samePage,
   tagDropdowns,
   visible,
@@ -19,10 +21,14 @@ import {
  * (see playwright.config.ts), except the HTTP status sweep, which runs once.
  */
 
+test.beforeEach(async ({ page }) => {
+  await blockExtras(page);
+});
+
 for (const path of site.pages) {
   test(`menu items and dropdowns work on ${path}`, async ({ page }, testInfo) => {
     await gotoOk(page, path);
-    await acceptCookies(page);
+    await prepare(page);
 
     const mobile = await openMobileMenu(page);
     testInfo.annotations.push({ type: 'layout', description: mobile ? 'mobile menu (☰)' : 'desktop menu' });
@@ -66,18 +72,23 @@ for (const path of site.pages) {
       expect(dropdowns.length, 'No dropdown menus found in the desktop header').toBeGreaterThanOrEqual(site.minDesktopDropdowns);
     }
 
-    for (const dd of dropdowns) {
+    for (const [i, first] of dropdowns.entries()) {
+      let dd = first;
+      if (mobile && i > 0) {
+        // Each mobile dropdown is tested on a fresh page, so an earlier one left open can't get in the way.
+        await gotoOk(page, path);
+        await prepare(page);
+        await openMobileMenu(page);
+        const again = (await tagDropdowns(page)).filter((d) => d.tappable).find((d) => d.label === first.label);
+        if (!again) {
+          expect.soft(false, `Dropdown "${first.label}" disappeared after reloading the page`).toBe(true);
+          continue;
+        }
+        dd = again;
+      }
       const { opened, note } = await expandDropdown(page, dd.id, mobile ? 'tap' : 'hover');
       expect.soft(opened, `Dropdown "${dd.label}" did not open${note ? ` (${note})` : ''}`).toBe(true);
-      if (!opened) {
-        if (mobile && !samePage(page.url(), new URL(path, site.baseURL).href)) {
-          // A tap navigated away; come back and reopen the menu for the next dropdown.
-          await gotoOk(page, path);
-          await openMobileMenu(page);
-          await tagDropdowns(page);
-        }
-        continue;
-      }
+      if (!opened) continue;
       const sub = page.locator(`[data-qa-sub="${dd.id}"]`);
       const links = sub.locator('a[href]').filter({ visible: true });
       expect.soft(await links.count(), `Dropdown "${dd.label}" opened but shows no links`).toBeGreaterThan(0);
@@ -90,7 +101,7 @@ for (const path of site.pages) {
 test('menu links open the right pages', async ({ page }, testInfo) => {
   test.setTimeout(300_000);
   await gotoOk(page, '/');
-  await acceptCookies(page);
+  await prepare(page);
   const home = page.url();
   const mobile = await openMobileMenu(page);
 
@@ -103,6 +114,7 @@ test('menu links open the right pages', async ({ page }, testInfo) => {
   const broken: string[] = [];
   for (const link of links) {
     await gotoOk(page, '/');
+    await prepare(page);
     if (mobile) await openMobileMenu(page);
 
     const a = visible(menu(page).locator(`a[href="${link.rawHref.replace(/"/g, '\\"')}"]`));
@@ -113,15 +125,20 @@ test('menu links open the right pages', async ({ page }, testInfo) => {
     }
 
     const before = page.url();
+    const navigated = page
+      .waitForURL((u) => !samePage(u.href, before), { timeout: 45_000, waitUntil: 'commit' })
+      .then(() => true, () => false);
     try {
-      await Promise.all([
-        page.waitForURL((u) => !samePage(u.href, before), { timeout: 30_000, waitUntil: 'domcontentloaded' }),
-        a.click(),
-      ]);
-    } catch {
-      broken.push(`${label}: clicking it did not open a page`);
+      await a.click({ timeout: 10_000 });
+    } catch (e) {
+      broken.push(`${label}: could not be tapped${blockedBy(e) || ' (it did not respond to the click)'}`);
       continue;
     }
+    if (!(await navigated)) {
+      broken.push(`${label}: tapped, but no new page opened within 45 seconds`);
+      continue;
+    }
+    await page.waitForLoadState('domcontentloaded', { timeout: 45_000 }).catch(() => {});
 
     const res = await page.request.get(page.url(), { maxRedirects: 5, timeout: 30_000 }).catch(() => null);
     if (!res) broken.push(`${label}: no response`);
