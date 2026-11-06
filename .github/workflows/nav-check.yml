@@ -16,8 +16,20 @@ concurrency:
 
 jobs:
   menus:
+    # One job per browser, all three running at the same time.
+    name: ${{ matrix.browser }}
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false        # finish every browser even if one fails
+      matrix:
+        browser: [chromium, firefox, webkit]
+    # Playwright's official image: all browsers and system libraries already installed,
+    # so there is no slow "install browsers" step.
+    # The version here MUST match "@playwright/test" in nav-check/package.json.
+    container:
+      image: mcr.microsoft.com/playwright:v1.65.0-noble
+      options: --user 1001
     defaults:
       run:
         working-directory: nav-check
@@ -26,20 +38,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
       - name: Install dependencies
         run: npm install
 
-      - name: Install Chrome, Firefox and Safari (WebKit)
-        run: npx playwright install --with-deps chromium firefox webkit
-
-      - name: Run menu checks (9 browser × screen combinations)
+      - name: Run menu checks (${{ matrix.browser }} — desktop, tablet, mobile)
         id: tests
         continue-on-error: true
-        run: npx playwright test
+        run: >
+          npx playwright test
+          --project=${{ matrix.browser }}-desktop
+          --project=${{ matrix.browser }}-tablet
+          --project=${{ matrix.browser }}-mobile
 
       - name: Write summary table
         if: always()
@@ -49,7 +58,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nav-check-report-${{ github.run_id }}
+          name: nav-check-report-${{ matrix.browser }}-${{ github.run_id }}
           path: |
             nav-check/playwright-report/
             nav-check/test-results/
@@ -61,9 +70,9 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           curl -sS -X POST -H 'Content-Type: application/json' \
-            --data "{\"text\":\":compass: idronline.org menu/link check failed. Summary and screenshots: ${RUN_URL}\"}" \
+            --data "{\"text\":\":compass: idronline.org menu/link check failed on ${{ matrix.browser }}. Summary and screenshots: ${RUN_URL}\"}" \
             "$SLACK_WEBHOOK_URL"
 
-      - name: Fail the run if any check failed
+      - name: Fail this browser's job if any check failed
         if: steps.tests.outcome == 'failure'
         run: exit 1
