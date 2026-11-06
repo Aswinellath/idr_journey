@@ -35,6 +35,21 @@ export const site = {
   /** Max number of menu links clicked per browser/screen (keeps runs short). */
   maxClickLinks: 12,
 
+  /**
+   * Floating panels to close before testing menus (they can sit on top of the mobile menu).
+   * Matched against button names, e.g. the IDR Answers chat panel's "Close chat" button.
+   */
+  closeButtons: [/^close chat$/i],
+
+  /**
+   * Third-party extras blocked during the test to keep pages fast (they don't affect menus).
+   * Remove an entry if a menu ever depends on it.
+   */
+  blockHosts: [
+    'youtube.com', 'youtube-nocookie.com', 'ytimg.com', 'googletagmanager.com', 'google-analytics.com',
+    'doubleclick.net', 'facebook.net', 'facebook.com', 'connect.facebook.net', 'hotjar.com', 'clarity.ms',
+  ],
+
   /** Links that are never checked. */
   skipLinks: [/^#/, /^javascript:/i, /^mailto:/i, /^tel:/i, /linkedin\.com/i],
 };
