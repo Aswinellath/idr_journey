@@ -27,9 +27,40 @@ export async function acceptCookies(page: Page) {
   await ok.click({ timeout: 3_000 }).catch(() => {});
 }
 
-/** Open a page and fail on an error status or a WordPress error screen. */
+/** Block slow third-party extras (video embeds, trackers) that don't affect menus. */
+export async function blockExtras(page: Page) {
+  await page.route(
+    (url) => site.blockHosts.some((h) => url.hostname === h || url.hostname.endsWith(`.${h}`)),
+    (route) => route.abort(),
+  );
+}
+
+/** Close the cookie banner and floating panels (e.g. the chat panel) that can cover the menu. */
+export async function prepare(page: Page) {
+  await acceptCookies(page);
+  for (const name of site.closeButtons) {
+    await visible(page.getByRole('button', { name })).click({ timeout: 2_000 }).catch(() => {});
+  }
+}
+
+/** If a click failed because something covered the element, say what it was. */
+export function blockedBy(e: unknown): string {
+  const msg = String((e as Error)?.message ?? e);
+  const line = msg.split('\n').find((l) => l.includes('intercepts pointer events'));
+  if (!line) return '';
+  const what = line.replace(/^[\s-]*/, '').replace(/\s*(from .*)?(subtree )?intercepts pointer events.*$/, '').trim();
+  return ` — something on the page is covering it: ${what.slice(0, 160)}`;
+}
+
+/** Open a page (one retry if the site is slow) and fail on an error status or a WordPress error screen. */
 export async function gotoOk(page: Page, path: string) {
-  const res = await page.goto(path, { waitUntil: 'domcontentloaded' });
+  let res;
+  try {
+    res = await page.goto(path, { waitUntil: 'domcontentloaded' });
+  } catch (e) {
+    if (!/Timeout/i.test(String(e))) throw e;
+    res = await page.goto(path, { waitUntil: 'domcontentloaded' }); // second try
+  }
   expect(res, `No response for ${path}`).not.toBeNull();
   expect(res!.status(), `${path} returned ${res!.status()}`).toBeLessThan(400);
   const body = page.locator('body');
@@ -142,24 +173,50 @@ export async function expandDropdown(
           },
           { loc: li.locator(':scope > span'), action: 'click' },
           { loc: li.locator(':scope > a[href="#"], :scope > a:not([href])'), action: 'click' },
+          // Some menus only open on hover, even on phones (a tap also counts as a hover there).
+          { loc: li.locator(':scope > a, :scope > button, :scope > span'), action: 'hover' },
         ];
 
   for (const { loc, action } of attempts) {
     const el = loc.first();
     if (!(await el.isVisible().catch(() => false))) continue;
     const before = page.url();
-    if (action === 'hover') await el.hover().catch(() => {});
-    else await el.click().catch(() => {});
+    try {
+      if (action === 'hover') {
+        await el.hover({ timeout: 10_000 });
+        await wiggle(page, el);
+      } else {
+        await el.click({ timeout: 10_000 });
+      }
+    } catch (e) {
+      const why = blockedBy(e);
+      if (why) return { opened: false, note: `the tap was blocked${why}` };
+      continue;
+    }
     // A "#" link only adds "#" to the address — that's not a new page.
     if (!samePage(page.url(), before)) return { opened: false, note: 'tapping it opened a new page instead of the submenu' };
     try {
-      await expect.poll(() => isOpen(sub), { timeout: 2_500 }).toBe(true);
+      await expect.poll(() => isOpen(sub), { timeout: 4_000 }).toBe(true);
       return { opened: true };
     } catch {
       /* try the next way */
     }
   }
   return { opened: false, note: mode === 'tap' ? 'no tappable arrow/toggle opened it' : 'hovering did not open it' };
+}
+
+/**
+ * Move the mouse gently across an element, like a person does. Many WordPress menus
+ * ("hoverIntent") only open after seeing slow mouse movement, not an instant jump.
+ */
+async function wiggle(page: Page, el: Locator) {
+  const box = await el.boundingBox();
+  if (!box) return;
+  const y = box.y + box.height / 2;
+  const x = box.x + box.width / 2;
+  await page.mouse.move(x - Math.min(8, box.width / 4), y, { steps: 6 });
+  await page.mouse.move(x + Math.min(8, box.width / 4), y, { steps: 6 });
+  await page.mouse.move(x, y, { steps: 3 });
 }
 
 /** Move the mouse away so a hover dropdown closes before the next one. */
