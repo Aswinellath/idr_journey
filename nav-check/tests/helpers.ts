@@ -97,16 +97,12 @@ export async function openMobileMenu(page: Page): Promise<boolean> {
   // Move the pointer away first: a pointer left over a hover menu (e.g. "Languages")
   // re-opens it after a reload, and the open list can sit on top of the ☰ button.
   await closeHover(page);
-  try {
-    await burger.click({ timeout: 10_000 });
-  } catch (e) {
-    const why = blockedBy(e);
-    throw new Error(why ? The ☰ menu button can't be tapped${why} : The ☰ menu button didn't respond to a tap);
-  }
-  await expect(
-    visible(menu(page).getByRole('link', { name: site.expectedMobileItems[0], exact: true })),
-    'Mobile menu did not open after tapping the ☰ icon',
-  ).toBeVisible();
+  const firstItem = visible(menu(page).getByRole('link', { name: site.expectedMobileItems[0], exact: true }));
+  const r = await humanClick(page, burger, {
+    done: () => firstItem.isVisible().catch(() => false),
+    touch: await isTouch(page),
+  });
+  if (!r.ok) throw new Error(The ☰ menu button didn't open the menu after ${r.tries} tries (${r.reason}));
   return true;
 }
 
@@ -167,79 +163,225 @@ export async function isOpen(sub: Locator): Promise<boolean> {
 
 
 /**
- * Try to open a dropdown the way a user would:
+ * Try to open a dropdown the way a person would:
  * desktop = hover (then click if it's a "#" toggle); touch = tap the toggle arrow/button.
+ * Each way is tried up to 3 times before giving up on it.
  */
 export async function expandDropdown(
   page: Page,
   id: number,
   mode: 'hover' | 'tap',
-): Promise<{ opened: boolean; note?: string }> {
+): Promise<{ opened: boolean; tries?: number; note?: string }> {
   const li = page.locator([data-qa-dd="${id}"]);
   const sub = page.locator([data-qa-sub="${id}"]);
-  if (await isOpen(sub)) return { opened: true };
+  const done = () => isOpen(sub);
+  if (await done()) return { opened: true, tries: 0 };
 
 
-  const attempts: Array<{ loc: Locator; action: 'hover' | 'click' }> =
+  const touch = mode === 'tap' && (await isTouch(page));
+  const before = page.url();
+  const navigated = () => !samePage(page.url(), before); // a "#" link only adds "#": not a new page
+
+
+  const ways: Array<{ loc: Locator; how: 'hover' | 'click' }> =
     mode === 'hover'
       ? [
-          { loc: li.locator(':scope > a, :scope > button, :scope > span'), action: 'hover' },
-          { loc: li, action: 'hover' },
-          { loc: li.locator(':scope > button, :scope > a[href="#"], :scope > a:not([href])'), action: 'click' },
+          { loc: li.locator(':scope > a, :scope > button, :scope > span'), how: 'hover' },
+          { loc: li.locator(':scope > button, :scope > a[href="#"], :scope > a:not([href])'), how: 'click' },
         ]
       : [
-          { loc: li.locator(':scope > button'), action: 'click' },
+          { loc: li.locator(':scope > button'), how: 'click' },
           {
             loc: li.locator(':scope > [class*="toggle"], :scope > [class*="arrow"], :scope > [class*="caret"], :scope > [class*="icon"]'),
-            action: 'click',
+            how: 'click',
           },
-          { loc: li.locator(':scope > span'), action: 'click' },
-          { loc: li.locator(':scope > a[href="#"], :scope > a:not([href])'), action: 'click' },
+          { loc: li.locator(':scope > span'), how: 'click' },
+          { loc: li.locator(':scope > a[href="#"], :scope > a:not([href])'), how: 'click' },
           // Some menus only open on hover, even on phones (a tap also counts as a hover there).
-          { loc: li.locator(':scope > a, :scope > button, :scope > span'), action: 'hover' },
+          { loc: li.locator(':scope > a, :scope > button, :scope > span'), how: 'hover' },
         ];
 
 
-  for (const { loc, action } of attempts) {
-    const el = loc.first();
+  let reason: string | undefined;
+  for (const way of ways) {
+    const el = way.loc.first();
     if (!(await el.isVisible().catch(() => false))) continue;
-    const before = page.url();
-    try {
-      if (action === 'hover') {
-        await el.hover({ timeout: 10_000 });
-        await wiggle(page, el);
-      } else {
-        await el.click({ timeout: 10_000 });
-      }
-    } catch (e) {
-      const why = blockedBy(e);
-      if (why) return { opened: false, note: the tap was blocked${why} };
-      continue;
-    }
-    // A "#" link only adds "#" to the address — that's not a new page.
-    if (!samePage(page.url(), before)) return { opened: false, note: 'tapping it opened a new page instead of the submenu' };
-    try {
-      await expect.poll(() => isOpen(sub), { timeout: 4_000 }).toBe(true);
-      return { opened: true };
-    } catch {
-      /* try the next way */
-    }
+    const r =
+      way.how === 'hover'
+        ? await humanHover(page, el, done)
+        : await humanClick(page, el, { done, touch, stopIf: navigated, waitMs: 4_000 });
+    if (navigated()) return { opened: false, note: 'tapping it opened a new page instead of the submenu' };
+    if (r.ok) return { opened: true, tries: r.tries };
+    reason = ${way.how === 'hover' ? 'hovered' : 'tapped'} ${r.tries} times: ${r.reason};
   }
-  return { opened: false, note: mode === 'tap' ? 'no tappable arrow/toggle opened it' : 'hovering did not open it' };
+  return { opened: false, note: reason ?? (mode === 'tap' ? 'no tappable arrow/toggle found' : 'nothing to hover over') };
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Human-like pointer actions                                          */
+/* ------------------------------------------------------------------ */
+
+
+export type ActionResult = { ok: boolean; tries: number; reason?: string };
+
+
+/** True on touch-screen emulations (phones, iPads). */
+export async function isTouch(page: Page): Promise<boolean> {
+  return page.evaluate(() => navigator.maxTouchPoints > 0).catch(() => false);
 }
 
 
 /**
- * Move the mouse gently across an element, like a person does. Many WordPress menus
- * ("hoverIntent") only open after seeing slow mouse movement, not an instant jump.
+ * Find a spot inside the element that a person could actually click: on screen and not
+ * covered by anything else. Tries the centre first, then other spots across the element.
+ * Returns what's covering it if every spot is covered.
  */
-async function wiggle(page: Page, el: Locator) {
+async function clickablePoint(loc: Locator): Promise<{ x: number; y: number } | { covered: string } | null> {
+  return loc
+    .evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) return null;
+      const spots = [[0.5, 0.5], [0.3, 0.5], [0.7, 0.5], [0.5, 0.3], [0.5, 0.7], [0.15, 0.5], [0.85, 0.5]];
+      let cover: Element | null = null;
+      for (const [fx, fy] of spots) {
+        const x = r.left + r.width * fx;
+        const y = r.top + r.height * fy;
+        if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue;
+        const top = document.elementFromPoint(x, y);
+        if (top && (top === el || el.contains(top))) return { x, y };
+        cover ??= top;
+      }
+      if (!cover) return null;
+      const tag = cover.tagName.toLowerCase();
+      const cls = (cover.getAttribute('class') || '').trim().split(/\s+/).slice(0, 2).join(' ');
+      const label = cover.getAttribute('aria-label') || (cover.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+      return { covered: <${tag}${cls ?  class="${cls}" : ''}>${label ?  "${label}" : ''} };
+    })
+    .catch(() => null);
+}
+
+
+/** Where this test last put the mouse (Playwright doesn't report it), so moves can follow a natural path. */
+const pointer = new WeakMap<Page, { x: number; y: number }>();
+
+
+/**
+ * Move the mouse like a person heading into a dropdown: first straight down/up to the
+ * target's row, then across. A straight diagonal can cut across neighbouring items and
+ * close a hover menu on the way, which people instinctively avoid.
+ */
+async function moveTo(page: Page, x: number, y: number, steps = 8) {
+  const from = pointer.get(page);
+  if (from && Math.abs(from.y - y) > 4 && Math.abs(from.x - x) > 4) {
+    await page.mouse.move(from.x, y, { steps: Math.ceil(steps / 2) });
+  }
+  await page.mouse.move(x, y, { steps });
+  pointer.set(page, { x, y });
+}
+
+
+/** Wait up to ms for done() to become true. */
+async function waitUntil(page: Page, done: () => Promise<boolean> | boolean, ms: number): Promise<boolean> {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (await done()) return true;
+    await page.waitForTimeout(200);
+  }
+  return !!(await done());
+}
+
+
+/**
+ * Click or tap like a person: scroll it into view, aim at a part that isn't covered,
+ * move the mouse there (or tap on touch screens), click, then wait to see if it worked.
+ * If nothing happened, pause a little longer and try again — up to tries times.
+ */
+export async function humanClick(
+  page: Page,
+  loc: Locator,
+  opts: { done: () => Promise<boolean> | boolean; touch?: boolean; stopIf?: () => boolean; tries?: number; waitMs?: number },
+): Promise<ActionResult> {
+  const tries = opts.tries ?? site.clickTries;
+  const waitMs = opts.waitMs ?? 4_000;
+  let reason = 'nothing happened after clicking';
+  for (let i = 1; i <= tries; i++) {
+    if (i > 1) {
+      if (await opts.done()) return { ok: true, tries: i - 1 }; // it worked, just slowly
+      await page.waitForTimeout(700 * i); // give animations / slow scripts more time
+    }
+    await loc.scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => {});
+    await page.waitForTimeout(150);
+    const p = await clickablePoint(loc);
+    if (!p) {
+      reason = "it isn't on screen";
+      continue;
+    }
+    if ('covered' in p) {
+      reason = something on the page is covering it: ${p.covered};
+      continue;
+    }
+    if (opts.touch) {
+      await page.touchscreen.tap(p.x, p.y).catch(() => page.mouse.click(p.x, p.y));
+    } else {
+      await moveTo(page, p.x, p.y, 8);
+      await page.waitForTimeout(100);
+      await page.mouse.click(p.x, p.y);
+    }
+    if (opts.stopIf?.()) return { ok: false, tries: i, reason: 'it opened a new page' };
+    if (await waitUntil(page, opts.done, waitMs)) return { ok: true, tries: i };
+    reason = 'nothing happened after clicking';
+  }
+  return { ok: false, tries, reason };
+}
+
+
+/**
+ * Hover like a person: come in from just outside the element, move slowly across it,
+ * then wait. Many WordPress menus ("hoverIntent") only open after real mouse movement.
+ * Retried up to tries times, moving away in between.
+ */
+export async function humanHover(page: Page, loc: Locator, done: () => Promise<boolean>, tries = site.clickTries): Promise<ActionResult> {
+  let reason = 'the dropdown did not appear';
+  for (let i = 1; i <= tries; i++) {
+    if (i > 1) {
+      await closeHover(page);
+      await page.waitForTimeout(500 * i);
+    }
+    await loc.scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => {});
+    const p = await clickablePoint(loc);
+    const box = await loc.boundingBox();
+    if (!p || !box) {
+      reason = "it isn't on screen";
+      continue;
+    }
+    if ('covered' in p) {
+      reason = something on the page is covering it: ${p.covered};
+      continue;
+    }
+    await page.mouse.move(Math.max(1, box.x - 10), Math.max(1, box.y - 6), { steps: 4 }); // just outside
+    await page.mouse.move(p.x, p.y, { steps: 10 });
+    await wiggle(page, loc, p);
+    pointer.set(page, p);
+    if (await waitUntil(page, done, 4_000)) return { ok: true, tries: i };
+  }
+  return { ok: false, tries, reason };
+}
+
+
+/**
+ * Move the mouse gently back and forth, like a person does. Many WordPress menus
+ * ("hoverIntent") only open after seeing slow mouse movement, not an instant jump.
+ * Stays around the given point (a visible part of the element), or the centre if none is given.
+ */
+async function wiggle(page: Page, el: Locator, at?: { x: number; y: number }) {
   const box = await el.boundingBox();
   if (!box) return;
-  const y = box.y + box.height / 2;
-  const x = box.x + box.width / 2;
-  await page.mouse.move(x - Math.min(8, box.width / 4), y, { steps: 6 });
-  await page.mouse.move(x + Math.min(8, box.width / 4), y, { steps: 6 });
+  const x = at?.x ?? box.x + box.width / 2;
+  const y = at?.y ?? box.y + box.height / 2;
+  const d = Math.min(4, box.width / 8);
+  await page.mouse.move(x - d, y, { steps: 6 });
+  await page.mouse.move(x + d, y, { steps: 6 });
   await page.mouse.move(x, y, { steps: 3 });
 }
 
@@ -249,6 +391,7 @@ export async function closeHover(page: Page) {
   await page.keyboard.press('Escape').catch(() => {});
   const vp = page.viewportSize();
   await page.mouse.move(2, (vp?.height ?? 800) - 2).catch(() => {});
+  pointer.set(page, { x: 2, y: (vp?.height ?? 800) - 2 });
 }
 
 
@@ -267,7 +410,7 @@ export async function expectInsideScreen(page: Page, loc: Locator, label: string
 
 
 /** Every link inside the menu areas (optionally only visible ones), de-duplicated. */
-export async function collectMenuLinks(page: Page, visibleOnly: boolean): Promise<MenuLink[]> {
+export async function collectMenuLinks(page: Page, visibleOnly: boolean, scope = site.menuScope): Promise<MenuLink[]> {
   const raw: MenuLink[] = await page.evaluate(
     ({ scope, visibleOnly }) => {
       const shown = (el: Element) => {
@@ -292,7 +435,7 @@ export async function collectMenuLinks(page: Page, visibleOnly: boolean): Promis
       );
       return out;
     },
-    { scope: site.menuScope, visibleOnly },
+    { scope, visibleOnly },
   );
   const seen = new Set<string>();
   return raw.filter((l) => {
@@ -308,4 +451,27 @@ export async function collectMenuLinks(page: Page, visibleOnly: boolean): Promis
 export function samePage(a: string, b: string) {
   const norm = (u: string) => u.split('#')[0].replace(/\/$/, '');
   return norm(a) === norm(b);
+}
+
+
+/**
+ * Click a menu link like a person (up to 3 tries) and check a real page opens.
+ * Returns null if it worked, or a one-line description of what went wrong.
+ */
+export async function clickLinkAndCheck(page: Page, link: MenuLink, a: Locator): Promise<{ problem: string | null; tries: number }> {
+  const label = "${link.text || '(no text)'}" → ${link.href};
+  if (!(await a.isVisible().catch(() => false))) return { problem: ${label}: not visible, tries: 0 };
+  const before = page.url();
+  const r = await humanClick(page, a, {
+    done: () => !samePage(page.url(), before),
+    touch: await isTouch(page),
+    waitMs: 15_000,
+  });
+  if (!r.ok) return { problem: ${label}: ${r.tries} clicks, no page opened (${r.reason}), tries: r.tries };
+  await page.waitForLoadState('domcontentloaded', { timeout: 45_000 }).catch(() => {});
+  const res = await page.request.get(page.url(), { maxRedirects: 5, timeout: 30_000 }).catch(() => null);
+  if (!res) return { problem: ${label}: no response, tries: r.tries };
+  if (res.status() >= 400) return { problem: ${label}: HTTP ${res.status()}, tries: r.tries };
+  if (/page not found|^404\b/i.test(await page.title())) return { problem: ${label}: shows a "page not found" page, tries: r.tries };
+  return { problem: null, tries: r.tries };
 }
